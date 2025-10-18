@@ -2324,9 +2324,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function playVoiceNarration(text, language = 'en') {
-            if (!voiceEnabled) return;
+            console.log('🎤 playVoiceNarration called', { voiceEnabled, textLength: text.length });
+            if (!voiceEnabled) {
+                console.log('❌ Voice disabled, skipping');
+                return;
+            }
             
             try {
+                console.log('📡 Fetching TTS from server...');
                 // Stop any currently playing audio
                 if (currentAudio) {
                     currentAudio.pause();
@@ -2340,17 +2345,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
                 
                 if (!response.ok) {
-                    console.error('TTS error:', response.statusText);
+                    console.error('❌ TTS error:', response.status, response.statusText);
                     return;
                 }
                 
+                console.log('✅ TTS response received');
+                
                 // Get audio blob
                 const audioBlob = await response.blob();
+                console.log('🎵 Audio blob received:', audioBlob.size, 'bytes');
                 const audioUrl = URL.createObjectURL(audioBlob);
                 
                 // Play audio
                 currentAudio = new Audio(audioUrl);
-                currentAudio.play();
+                console.log('▶️ Attempting to play audio...');
+                const playPromise = currentAudio.play();
+                
+                if (playPromise !== undefined) {
+                    playPromise
+                        .then(() => console.log('✅ Audio playing successfully'))
+                        .catch(error => console.error('❌ Audio playback error:', error));
+                }
                 
                 // Clean up URL when audio finishes
                 currentAudio.onended = () => {
