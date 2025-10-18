@@ -64,7 +64,10 @@ VOICES = {
 
 def generate_speech(text, language='en', voice_settings=None):
     if not ELEVENLABS_API_KEY:
+        print("⚠️  ELEVENLABS_API_KEY not configured")
         raise ValueError("ELEVENLABS_API_KEY not configured")
+    
+    print(f"🎙️  Generating speech for text: {text[:50]}...")
     
     voice = VOICES.get(language, VOICES['en'])
     voice_id = voice['voice_id']
@@ -91,12 +94,22 @@ def generate_speech(text, language='en', voice_settings=None):
         "voice_settings": voice_settings
     }
     
-    response = requests.post(url, json=data, headers=headers)
-    
-    if response.status_code != 200:
-        raise Exception(f"ElevenLabs API error: {response.status_code}")
-    
-    return response.content
+    try:
+        print(f"📡 Calling ElevenLabs API: {url}")
+        response = requests.post(url, json=data, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"❌ ElevenLabs API error: {response.status_code} - {response.text}")
+            raise Exception(f"ElevenLabs API error: {response.status_code} - {response.text}")
+        
+        print(f"✅ Speech generated successfully ({len(response.content)} bytes)")
+        return response.content
+    except requests.exceptions.Timeout:
+        print("⏱️  ElevenLabs API timeout (10s)")
+        raise Exception("ElevenLabs API timeout")
+    except requests.exceptions.RequestException as e:
+        print(f"🔥 ElevenLabs API request error: {str(e)}")
+        raise Exception(f"ElevenLabs API request error: {str(e)}")
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -3048,18 +3061,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 @app.route('/tts', methods=['POST'])
 def text_to_speech():
     try:
+        print("\n🎤 TTS endpoint called")
         data = request.get_json()
         text = data.get('text', '')
         language = data.get('language', 'en')
         
+        print(f"📝 Text length: {len(text)} characters")
+        print(f"🌍 Language: {language}")
+        
         if not text:
+            print("⚠️  No text provided")
             return jsonify({'error': 'No text provided'}), 400
         
         if language not in VOICES:
+            print(f"⚠️  Unsupported language: {language}")
             return jsonify({'error': f'Unsupported language: {language}'}), 400
         
         audio_data = generate_speech(text, language)
         
+        print(f"✅ Sending audio file ({len(audio_data)} bytes)")
         return send_file(
             io.BytesIO(audio_data),
             mimetype='audio/mpeg',
