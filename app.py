@@ -886,7 +886,7 @@ def chat():
         response = client.chat.completions.create(
             model="gpt-5.6-luna",
             messages=history,
-            max_tokens=1000,
+            max_completion_tokens=1000,
             temperature=0.8
         )
         
