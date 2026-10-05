@@ -25,7 +25,7 @@ from campaign_session_api import *
 from command_system import CommandSystem
 from intelligent_dice_system import IntelligentDiceSystem
 from pdf_upload_handler import PDFUploadHandler
-from migrate_database import migrate_database
+from migrate_database import migrate_database, ensure_character_columns
 
 # Run database migration on startup
 migrate_database()
@@ -139,9 +139,10 @@ def init_db():
     conn = sqlite3.connect('vtm_storyteller.db')
     c = conn.cursor()
     
-    # Characters table (enhanced)
+    # Characters table (must stay compatible with migrate_database + /character/create)
     c.execute('''CREATE TABLE IF NOT EXISTS characters
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id TEXT,
                   name TEXT NOT NULL,
                   concept TEXT,
                   chronicle_id INTEGER,
@@ -154,8 +155,11 @@ def init_db():
                   attributes TEXT,
                   skills TEXT,
                   disciplines TEXT,
-                  health INTEGER DEFAULT 10,
-                  willpower INTEGER DEFAULT 5,
+                  backgrounds TEXT,
+                  health INTEGER DEFAULT 3,
+                  willpower INTEGER DEFAULT 2,
+                  health_max INTEGER DEFAULT 3,
+                  willpower_max INTEGER DEFAULT 3,
                   humanity INTEGER DEFAULT 7,
                   hunger INTEGER DEFAULT 1,
                   blood_potency INTEGER DEFAULT 0,
@@ -166,6 +170,7 @@ def init_db():
                   roll20_character_id TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    ensure_character_columns(conn)
     
     # Chronicles table
     c.execute('''CREATE TABLE IF NOT EXISTS chronicles
@@ -497,56 +502,79 @@ def list_characters():
 
 @app.route('/character', methods=['POST'])
 @app.route('/character/create', methods=['POST'])
+def _attr_value(attributes, *names):
+    """Read an attribute whether keys are Title Case or lowercase."""
+    for name in names:
+        if name in attributes and attributes[name] is not None:
+            return int(attributes[name] or 0)
+    return 1
+
+
 def create_character():
     """Create a new character"""
     try:
-        data = request.json
+        data = request.get_json(silent=True) or {}
         
         # Support user_id from frontend
         user_id = data.get('user_id', session.get('user_id', 'default'))
         
         # Required fields
-        name = data.get('name')
-        clan = data.get('clan')
+        name = (data.get('name') or '').strip()
+        clan = (data.get('clan') or '').strip()
         concept = data.get('concept', '')
         
         if not name or not clan:
-            return jsonify({'error': 'Name and clan are required'}), 400
+            return jsonify({'success': False, 'error': 'Name and clan are required'}), 400
         
         # Optional fields with defaults
         chronicle_id = data.get('chronicle_id')
+        chronicle_name = (data.get('chronicle') or data.get('chronicle_name') or '').strip()
         generation = data.get('generation', 13)
         sire = data.get('sire', '')
         predator_type = data.get('predator_type', '')
         ambition = data.get('ambition', '')
         desire = data.get('desire', '')
         
-        # Stats
-        attributes = json.dumps(data.get('attributes', {
-            'strength': 1, 'dexterity': 1, 'stamina': 1,
-            'charisma': 1, 'manipulation': 1, 'composure': 1,
-            'intelligence': 1, 'wits': 1, 'resolve': 1
-        }))
+        raw_attributes = data.get('attributes') or {
+            'Strength': 1, 'Dexterity': 1, 'Stamina': 1,
+            'Charisma': 1, 'Manipulation': 1, 'Composure': 1,
+            'Intelligence': 1, 'Wits': 1, 'Resolve': 1
+        }
+        stamina = _attr_value(raw_attributes, 'Stamina', 'stamina')
+        composure = _attr_value(raw_attributes, 'Composure', 'composure')
+        resolve = _attr_value(raw_attributes, 'Resolve', 'resolve')
+
+        attributes = json.dumps(raw_attributes)
         skills = json.dumps(data.get('skills', {}))
         disciplines = json.dumps(data.get('disciplines', {}))
         backgrounds = json.dumps(data.get('backgrounds', {}))
         
-        health = data.get('health', 3)
-        willpower = data.get('willpower', 2)
+        health = data.get('health') or (stamina + 3)
+        willpower = data.get('willpower') or (composure + resolve)
         humanity = data.get('humanity', 7)
         hunger = data.get('hunger', 1)
         experience = data.get('experience', 0)
         
         conn = sqlite3.connect('vtm_storyteller.db')
+        ensure_character_columns(conn)
         c = conn.cursor()
+
+        if chronicle_name and not chronicle_id:
+            row = c.execute('SELECT id FROM chronicles WHERE name = ?', (chronicle_name,)).fetchone()
+            if row:
+                chronicle_id = row[0]
+            else:
+                c.execute('INSERT INTO chronicles (name) VALUES (?)', (chronicle_name,))
+                chronicle_id = c.lastrowid
+
         c.execute('''INSERT INTO characters 
-                    (name, clan, concept, chronicle_id, generation, sire, predator_type,
+                    (user_id, name, clan, concept, chronicle_id, generation, sire, predator_type,
                      ambition, desire, attributes, skills, disciplines, backgrounds,
-                     health, willpower, humanity, hunger, experience)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                 (name, clan, concept, chronicle_id, generation, sire, predator_type,
+                     health, willpower, health_max, willpower_max, humanity, hunger, experience)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                 (user_id, name, clan, concept, chronicle_id, generation, sire, predator_type,
                   ambition, desire, attributes, skills, disciplines, backgrounds,
-                  health, willpower, humanity, hunger, experience))
+                  health, willpower, health, willpower, humanity, hunger, experience))
         character_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -560,6 +588,7 @@ def create_character():
             'character_id': character_id
         }), 201
     except Exception as e:
+        print(f"Character creation failed: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/character/<int:character_id>', methods=['GET'])
@@ -567,6 +596,7 @@ def get_character(character_id):
     """Get a specific character"""
     try:
         conn = sqlite3.connect('vtm_storyteller.db')
+        ensure_character_columns(conn)
         c = conn.cursor()
         char = c.execute('''SELECT id, name, clan, concept, chronicle_id, 
                            generation, sire, predator_type, ambition, desire,
@@ -2085,10 +2115,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </header>
         
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('chat')">Chat</div>
-            <div class="tab" onclick="switchTab('character')">Character</div>
-            <div class="tab" onclick="switchTab('sheet')">Character Sheet</div>
-            <div class="tab" onclick="switchTab('dice')">Dice Roller</div>
+            <div class="tab active" data-tab="chat" onclick="switchTab('chat')">Chat</div>
+            <div class="tab" data-tab="character" onclick="switchTab('character')">Character</div>
+            <div class="tab" data-tab="sheet" onclick="switchTab('sheet')">Character Sheet</div>
+            <div class="tab" data-tab="dice" onclick="switchTab('dice')">Dice Roller</div>
         </div>
         
         <!-- Chat Tab -->
@@ -2402,6 +2432,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             mental: ['Academics', 'Awareness', 'Finance', 'Investigation', 'Medicine', 'Occult', 'Politics', 'Science', 'Technology']
         };
         
+        const allDisciplines = ['Animalism', 'Auspex', 'Celerity', 'Dominate', 'Fortitude', 'Obfuscate', 'Potence', 'Presence', 'Protean', 'Blood Sorcery'];
+        
+        function fieldId(prefix, name) {
+            return prefix + '-' + String(name).replace(/\\s+/g, '_');
+        }
+        
+        function attrVal(attrs, name) {
+            if (!attrs) return 0;
+            return Number(attrs[name] ?? attrs[String(name).toLowerCase()] ?? 0) || 0;
+        }
+        
         // Character creation state
         let characterData = {
             attributes: {},
@@ -2411,11 +2452,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         // Tab switching
         function switchTab(tabName) {
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === tabName);
+            });
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
-            event.target.classList.add('active');
-            document.getElementById(tabName + '-tab').classList.add('active');
+            const panel = document.getElementById(tabName + '-tab');
+            if (panel) panel.classList.add('active');
         }
         
         // Chat functionality
@@ -2683,7 +2725,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             
             // Update disciplines for step 5
             const selectedClan = clans.find(c => c.name === clanName);
-            updateDisciplines(selectedClan.disciplines);
+            const disciplineOptions = (clanName === 'Caitiff')
+                ? allDisciplines
+                : selectedClan.disciplines.filter(d => !d.startsWith('Choose'));
+            updateDisciplines(disciplineOptions);
         }
         
         function initializeAttributes() {
@@ -2740,7 +2785,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     itemDiv.className = 'skill-item';
                     itemDiv.innerHTML = `
                         <span>${skill}</span>
-                        <div class="dots" id="skill-${skill}">
+                        <div class="dots" id="${fieldId('skill', skill)}">
                             ${[1,2,3,4,5].map(i => `<div class="dot" onclick="setSkillDot('${skill}', ${i})"></div>`).join('')}
                         </div>
                     `;
@@ -2753,7 +2798,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function setSkillDot(skill, value) {
             characterData.skills[skill] = value;
-            const dotsContainer = document.getElementById(`skill-${skill}`);
+            const dotsContainer = document.getElementById(fieldId('skill', skill));
+            if (!dotsContainer) return;
             const dots = dotsContainer.querySelectorAll('.dot');
             dots.forEach((dot, index) => {
                 if (index < value) {
@@ -2774,7 +2820,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 div.className = 'attribute-item';
                 div.innerHTML = `
                     <span>${disc}</span>
-                    <div class="dots" id="disc-${disc}">
+                    <div class="dots" id="${fieldId('disc', disc)}">
                         ${[1,2].map(i => `<div class="dot" onclick="setDisciplineDot('${disc}', ${i})"></div>`).join('')}
                     </div>
                 `;
@@ -2784,7 +2830,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function setDisciplineDot(disc, value) {
             characterData.disciplines[disc] = value;
-            const dotsContainer = document.getElementById(`disc-${disc}`);
+            const dotsContainer = document.getElementById(fieldId('disc', disc));
+            if (!dotsContainer) return;
             const dots = dotsContainer.querySelectorAll('.dot');
             dots.forEach((dot, index) => {
                 if (index < value) {
@@ -2796,13 +2843,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function finishCreation() {
-            const name = document.getElementById('char-name').value;
-            const concept = document.getElementById('char-concept').value;
+            const name = document.getElementById('char-name').value.trim();
+            const concept = document.getElementById('char-concept').value.trim();
+            const chronicle = document.getElementById('char-chronicle').value.trim();
             
             if (!name || !characterData.clan) {
-                alert('Please complete all required fields');
+                alert('Please enter a name and choose a clan');
                 return;
             }
+            
+            const stamina = attrVal(characterData.attributes, 'Stamina') || 1;
+            const composure = attrVal(characterData.attributes, 'Composure') || 1;
+            const resolve = attrVal(characterData.attributes, 'Resolve') || 1;
             
             try {
                 const response = await fetch('/character/create', {
@@ -2813,22 +2865,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         name,
                         clan: characterData.clan,
                         concept,
+                        chronicle,
                         attributes: characterData.attributes,
                         skills: characterData.skills,
-                        disciplines: characterData.disciplines
+                        disciplines: characterData.disciplines,
+                        health: stamina + 3,
+                        willpower: composure + resolve
                     })
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
-                    alert('Character created successfully!');
                     currentCharacter = data.character_id;
-                    loadCharacterSheet(data.character_id);
                     document.getElementById('creation-wizard').style.display = 'none';
+                    await loadCharacterSheet(data.character_id);
                     switchTab('sheet');
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Error: ' + (data.error || 'Character creation failed'));
                 }
             } catch (error) {
                 alert('Error creating character: ' + error.message);
@@ -2867,13 +2921,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="tracker">
                             <h4>Health</h4>
                             <div class="tracker-boxes">
-                                ${Array(char.health + 3).fill(0).map((_, i) => `<div class="tracker-box"></div>`).join('')}
+                                ${Array(Math.max(1, Number(char.health) || 1)).fill(0).map((_, i) => `<div class="tracker-box"></div>`).join('')}
                             </div>
                         </div>
                         <div class="tracker">
                             <h4>Willpower</h4>
                             <div class="tracker-boxes">
-                                ${Array(char.willpower + 3).fill(0).map((_, i) => `<div class="tracker-box"></div>`).join('')}
+                                ${Array(Math.max(1, Number(char.willpower) || 1)).fill(0).map((_, i) => `<div class="tracker-box"></div>`).join('')}
                             </div>
                         </div>
                         <div class="tracker">
@@ -2899,7 +2953,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                     <div class="attribute-item">
                                         <span>${attr}</span>
                                         <div class="dots">
-                                            ${[1,2,3,4,5].map(i => `<div class="dot ${i <= char.attributes[attr] ? 'filled' : ''}"></div>`).join('')}
+                                            ${[1,2,3,4,5].map(i => `<div class="dot ${i <= attrVal(char.attributes, attr) ? 'filled' : ''}"></div>`).join('')}
                                         </div>
                                     </div>
                                 `).join('')}
@@ -2916,7 +2970,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                     <div class="skill-item">
                                         <span>${skill}</span>
                                         <div class="dots">
-                                            ${[1,2,3,4,5].map(i => `<div class="dot ${i <= (char.skills[skill] || 0) ? 'filled' : ''}"></div>`).join('')}
+                                            ${[1,2,3,4,5].map(i => `<div class="dot ${i <= attrVal(char.skills, skill) ? 'filled' : ''}"></div>`).join('')}
                                         </div>
                                     </div>
                                 `).join('')}
