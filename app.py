@@ -887,7 +887,6 @@ def chat():
             model="gpt-5.6-luna",
             messages=history,
             max_completion_tokens=1000,
-            temperature=0.8
         )
         
         assistant_message = response.choices[0].message.content
